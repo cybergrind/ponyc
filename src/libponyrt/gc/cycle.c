@@ -10,14 +10,6 @@
 #include <inttypes.h>
 #include <assert.h>
 
-enum
-{
-  CYCLE_INIT,
-  CYCLE_BLOCK,
-  CYCLE_UNBLOCK,
-  CYCLE_ACK
-};
-
 typedef struct init_msg_t
 {
   pony_msg_t msg;
@@ -43,7 +35,7 @@ typedef struct viewref_t
   size_t rc;
 } viewref_t;
 
-static uint64_t viewref_hash(viewref_t* vref)
+static size_t viewref_hash(viewref_t* vref)
 {
   return hash_ptr(vref->view);
 }
@@ -85,7 +77,7 @@ struct view_t
   perceived_t* perceived;
 };
 
-static uint64_t view_hash(view_t* view)
+static size_t view_hash(view_t* view)
 {
   return hash_ptr(view->actor);
 }
@@ -102,6 +94,13 @@ static void view_free(view_t* view)
   if(view->view_rc == 0)
   {
     viewrefmap_destroy(&view->map);
+
+    if(view->delta != NULL)
+    {
+      deltamap_free(view->delta);
+      view->delta = NULL;
+    }
+
     POOL_FREE(view_t, view);
   }
 }
@@ -119,9 +118,9 @@ struct perceived_t
   viewmap_t map;
 };
 
-static uint64_t perceived_hash(perceived_t* per)
+static size_t perceived_hash(perceived_t* per)
 {
-  return hash_int(per->token);
+  return hash_size(per->token);
 }
 
 static bool perceived_cmp(perceived_t* a, perceived_t* b)
@@ -154,10 +153,6 @@ typedef struct detector_t
   viewmap_t deferred;
   perceivedmap_t perceived;
 
-  size_t block_msgs;
-  size_t unblock_msgs;
-  size_t conf_msgs;
-  size_t ack_msgs;
   size_t attempted;
   size_t detected;
   size_t collected;
@@ -437,7 +432,6 @@ static void send_conf(pony_ctx_t* ctx, detector_t* d, perceived_t* per)
       break;
   }
 
-  d->conf_msgs += count;
   per->last_conf = i;
 }
 
@@ -473,6 +467,8 @@ static bool detect(pony_ctx_t* ctx, detector_t* d, view_t* view)
 
 static void deferred(pony_ctx_t* ctx, detector_t* d)
 {
+  d->since_deferred++;
+
   if(d->since_deferred < d->next_deferred)
     return;
 
@@ -559,8 +555,6 @@ static void collect(pony_ctx_t* ctx, detector_t* d, perceived_t* per)
   {
     actor_destroy(view->actor);
     viewmap_remove(&d->views, view);
-
-    view->actor = NULL;
     view_free(view);
   }
 
@@ -609,8 +603,6 @@ static void block(pony_ctx_t* ctx, detector_t* d, pony_actor_t* actor,
       viewmap_put(&d->deferred, view);
       view->deferred = true;
     }
-
-    d->since_deferred++;
 
     // look for cycles
     deferred(ctx, d);
@@ -664,6 +656,26 @@ static void ack(pony_ctx_t* ctx, detector_t* d, size_t token)
 
 static void final(pony_ctx_t* ctx, pony_actor_t* self)
 {
+  // Find block messages and invoke finalisers for those actors
+  pony_msg_t* msg;
+
+  while((msg = messageq_pop(&self->q)) != NULL)
+  {
+    if(msg->id == ACTORMSG_BLOCK)
+    {
+      block_msg_t* m = (block_msg_t*)msg;
+
+      if(m->delta != NULL)
+        deltamap_free(m->delta);
+
+      if(!actor_pendingdestroy(m->actor))
+      {
+        actor_setpendingdestroy(m->actor);
+        actor_final(ctx, m->actor);
+      }
+    }
+  }
+
   detector_t* d = (detector_t*)self;
   size_t i = HASHMAP_BEGIN;
   view_t* view;
@@ -673,25 +685,55 @@ static void final(pony_ctx_t* ctx, pony_actor_t* self)
   // blocked, it has already been destroyed.
   while((view = viewmap_next(&d->views, &i)) != NULL)
   {
-    if(view->blocked)
+    if(view->blocked && !actor_pendingdestroy(view->actor))
+    {
+      actor_setpendingdestroy(view->actor);
       actor_final(ctx, view->actor);
+    }
   }
 
   // Terminate the scheduler.
   scheduler_terminate();
 }
 
+#ifndef NDEBUG
+
 static void dump_view(view_t* view)
 {
-  printf("%p: %lu (%s)\n",
-    view->actor, view->rc, view->blocked ? "blocked" : "unblocked");
+  printf("%p: " __zu "/" __zu " (%s)%s%s\n",
+    view->actor, view->rc, view->actor->gc.rc,
+    view->blocked ? "blocked" : "unblocked",
+    view->rc == view->actor->gc.rc ? "" : " ERROR",
+    view->actor->gc.delta == NULL ? "" : " DELTA");
 
   size_t i = HASHMAP_BEGIN;
   viewref_t* p;
+  actorref_t* aref;
 
   while((p = viewrefmap_next(&view->map, &i)) != NULL)
   {
-    printf("\t%p: %lu\n", p->view->actor, p->rc);
+    aref = actormap_getactor(&view->actor->gc.foreign, p->view->actor);
+
+    if(aref != NULL)
+    {
+      printf("\t%p: " __zu "/" __zu " %s\n",
+        p->view->actor, p->rc, actorref_rc(aref),
+        p->rc == actorref_rc(aref) ? "" : "ERROR");
+    } else {
+      printf("\t%p: " __zu " ERROR\n", p->view->actor, p->rc);
+    }
+  }
+
+  if(actormap_size(&view->actor->gc.foreign) != viewrefmap_size(&view->map))
+  {
+    printf("\t--- ERROR\n");
+
+    i = HASHMAP_BEGIN;
+
+    while((aref = actormap_next(&view->actor->gc.foreign, &i)) != NULL)
+    {
+      printf("\t%p: " __zu "\n", actorref_actor(aref), actorref_rc(aref));
+    }
   }
 }
 
@@ -735,6 +777,8 @@ void check_views()
   }
 }
 
+#endif
+
 static void cycle_dispatch(pony_ctx_t* ctx, pony_actor_t* self,
   pony_msg_t* msg)
 {
@@ -742,46 +786,35 @@ static void cycle_dispatch(pony_ctx_t* ctx, pony_actor_t* self,
 
   switch(msg->id)
   {
-    case CYCLE_INIT:
-    {
-      init_msg_t* m = (init_msg_t*)msg;
-      d->min_deferred = 1ULL << m->min_deferred;
-      d->max_deferred = 1ULL << m->max_deferred;
-      d->conf_group = 1ULL << m->conf_group;
-      d->next_deferred = d->min_deferred;
-      break;
-    }
-
-    case CYCLE_BLOCK:
+    case ACTORMSG_BLOCK:
     {
       block_msg_t* m = (block_msg_t*)msg;
-      d->block_msgs++;
       block(ctx, d, m->actor, m->rc, m->delta);
       break;
     }
 
-    case CYCLE_UNBLOCK:
+    case ACTORMSG_UNBLOCK:
     {
       pony_msgp_t* m = (pony_msgp_t*)msg;
-      d->unblock_msgs++;
       unblock(d, (pony_actor_t*)m->p);
       break;
     }
 
-    case CYCLE_ACK:
+    case ACTORMSG_ACK:
     {
       pony_msgi_t* m = (pony_msgi_t*)msg;
-      d->ack_msgs++;
       ack(ctx, d, m->i);
       break;
     }
 
+#ifndef NDEBUG
     default:
     {
       // Never happens, used to keep debug functions.
       dump_views();
       check_views();
     }
+#endif
   }
 }
 
@@ -789,6 +822,7 @@ static pony_type_t cycle_type =
 {
   0,
   sizeof(detector_t),
+  0,
   0,
   0,
   NULL,
@@ -820,36 +854,37 @@ void cycle_create(pony_ctx_t* ctx, uint32_t min_deferred,
   cycle_detector = pony_create(ctx, &cycle_type);
   actor_setsystem(cycle_detector);
 
-  init_msg_t* m = (init_msg_t*)pony_alloc_msg(
-    POOL_INDEX(sizeof(init_msg_t)), CYCLE_INIT);
-
-  m->min_deferred = min_deferred;
-  m->max_deferred = max_deferred;
-  m->conf_group = conf_group;
-
-  pony_sendv(ctx, cycle_detector, &m->msg);
+  detector_t* d = (detector_t*)cycle_detector;
+  d->min_deferred = (size_t)1 << (size_t)min_deferred;
+  d->max_deferred = (size_t)1 << (size_t)max_deferred;
+  d->conf_group = (size_t)1 << (size_t)conf_group;
+  d->next_deferred = min_deferred;
 }
 
 void cycle_block(pony_ctx_t* ctx, pony_actor_t* actor, gc_t* gc)
 {
+  assert(ctx->current == actor);
+  assert(&actor->gc == gc);
+
   block_msg_t* m = (block_msg_t*)pony_alloc_msg(
-    POOL_INDEX(sizeof(block_msg_t)), CYCLE_BLOCK);
+    POOL_INDEX(sizeof(block_msg_t)), ACTORMSG_BLOCK);
 
   m->actor = actor;
   m->rc = gc_rc(gc);
   m->delta = gc_delta(gc);
+  assert(gc->delta == NULL);
 
   pony_sendv(ctx, cycle_detector, &m->msg);
 }
 
 void cycle_unblock(pony_ctx_t* ctx, pony_actor_t* actor)
 {
-  pony_sendp(ctx, cycle_detector, CYCLE_UNBLOCK, actor);
+  pony_sendp(ctx, cycle_detector, ACTORMSG_UNBLOCK, actor);
 }
 
 void cycle_ack(pony_ctx_t* ctx, size_t token)
 {
-  pony_sendi(ctx, cycle_detector, CYCLE_ACK, token);
+  pony_sendi(ctx, cycle_detector, ACTORMSG_ACK, token);
 }
 
 void cycle_terminate(pony_ctx_t* ctx)

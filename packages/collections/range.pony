@@ -1,4 +1,4 @@
-class Range[A: (Real[A] val & Number) = U64] is Iterator[A]
+class Range[A: (Real[A] val & Number) = USize] is Iterator[A]
   """
   Produces [min, max).
   """
@@ -17,7 +17,7 @@ class Range[A: (Real[A] val & Number) = U64] is Iterator[A]
     _idx < _max
 
   fun ref next(): A =>
-    if _idx < _max then
+    if has_next() then
       _idx = _idx + _inc
     else
       _idx

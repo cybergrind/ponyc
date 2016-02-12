@@ -66,7 +66,7 @@ struct debug_frame_t
   debug_frame_t* prev;
 };
 
-static uint64_t symbol_hash(debug_sym_t* symbol);
+static size_t symbol_hash(debug_sym_t* symbol);
 static bool symbol_cmp(debug_sym_t* a, debug_sym_t* b);
 static void symbol_free(debug_sym_t* symbol);
 
@@ -91,7 +91,7 @@ struct symbols_t
   debug_frame_t* frame;
 };
 
-static uint64_t symbol_hash(debug_sym_t* symbol)
+static size_t symbol_hash(debug_sym_t* symbol)
 {
   return hash_ptr(symbol->name);
 }
