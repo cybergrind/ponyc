@@ -51,6 +51,10 @@ static const lextoken_t symbols[] =
 
   { "<<", TK_LSHIFT },
   { ">>", TK_RSHIFT },
+  { "+=", TK_AUGPLUS },
+  { "-=", TK_AUGPLUS },
+  { "*=", TK_AUGPLUS },
+  { "/=", TK_AUGPLUS },
 
   { "==", TK_EQ },
   { "!=", TK_NE },

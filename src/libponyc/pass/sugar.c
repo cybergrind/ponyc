@@ -1048,6 +1048,18 @@ static ast_result_t sugar_binop(ast_t** astp, const char* fn_name)
 }
 
 
+static ast_result_t sugar_augop(ast_t** astp, const token_id OPERATION)
+{
+  AST_GET_CHILDREN(*astp, left, right);
+  REPLACE(astp,
+    NODE(TK_ASSIGN,
+      NODE(OPERATION, TREE(left) TREE(right))
+      TREE(left)
+      ));
+  return AST_OK;
+}
+
+
 static ast_result_t sugar_unop(ast_t** astp, const char* fn_name)
 {
   AST_GET_CHILDREN(*astp, expr);
@@ -1402,6 +1414,10 @@ ast_result_t pass_sugar(ast_t** astp, pass_opt_t* options)
     case TK_ASSIGN:     return sugar_update(astp);
     case TK_OBJECT:     return sugar_object(options, astp);
     case TK_AS:         return sugar_as(options, astp);
+    case TK_AUGPLUS:    return sugar_augop(astp, TK_PLUS);
+    case TK_AUGMINUS:   return sugar_augop(astp, TK_MINUS);
+    case TK_AUGMULTIPLY:return sugar_augop(astp, TK_MULTIPLY);
+    case TK_AUGDIVIDE:  return sugar_augop(astp, TK_DIVIDE);
     case TK_PLUS:       return sugar_binop(astp, "add");
     case TK_MINUS:      return sugar_binop(astp, "sub");
     case TK_MULTIPLY:   return sugar_binop(astp, "mul");

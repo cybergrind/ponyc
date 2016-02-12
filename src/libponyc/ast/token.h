@@ -75,6 +75,12 @@ typedef enum token_id
   TK_DONTCARE,
   TK_CONSTANT,
 
+  // Augmented operations
+  TK_AUGPLUS,
+  TK_AUGMINUS,
+  TK_AUGMULTIPLY,
+  TK_AUGDIVIDE,
+
   // Newline symbols, only used by lexer and parser
   TK_LPAREN_NEW,
   TK_LSQUARE_NEW,
